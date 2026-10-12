@@ -20,13 +20,16 @@ pip install "chainwatch-payments[bitcoin]"     # + BTC default source
 pip install "chainwatch-payments[tron]"        # + TRON TRC-20 default source
 pip install "chainwatch-payments[evm]"         # + Ethereum/EVM ERC-20 default source
 pip install "chainwatch-payments[all]"
+pip install "chainwatch-payments[fast]"       # optional libsecp256k1 speed-up
 ```
 
-The core is pure Python. The extras add `httpx` (the default HTTP transport for
-the shipped chain sources) and C-accelerated crypto (`coincurve` for secp256k1,
-`pycryptodome` for Keccak). Without the accelerators the package falls back to
-its own pure-Python implementations, which produce identical results and are
-tested against the same vectors.
+The core is pure Python. The chain extras add `httpx` (the default HTTP
+transport for the shipped chain sources) and, for TRON/EVM, `pycryptodome` for
+a fast Keccak. `[fast]` adds `coincurve` (libsecp256k1) for quicker address
+derivation; it is optional and may need a C compiler on very new Python
+versions. Without the accelerators the package uses its own pure-Python
+implementations, which produce identical results and are tested against the
+same vectors.
 
 ## The watch-only model
 

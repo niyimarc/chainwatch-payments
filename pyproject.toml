@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chainwatch-payments"
-version = "0.1.0"
+version = "0.0.1"
 description = "Watch-only, multi-chain crypto payment detection: derive receive addresses from xpubs and confirm incoming payments. No private keys, no gateway."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,12 +23,14 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Each extra brings the HTTP transport for that chain's default source plus
-# optional C-accelerated crypto (libsecp256k1, keccak). Without them the
-# package still works using its pure-Python implementations.
-bitcoin = ["httpx>=0.27", "coincurve>=20"]
-tron = ["httpx>=0.27", "coincurve>=20", "pycryptodome>=3.20"]
-evm = ["httpx>=0.27", "coincurve>=20", "pycryptodome>=3.20"]
+# Each chain extra brings the HTTP transport for that chain's default source
+# (plus a fast Keccak for TRON/EVM). `fast` adds libsecp256k1 bindings for
+# quicker derivation; it may need a C compiler on very new Pythons, so it is
+# kept separate. Without it the pure-Python implementation gives identical results.
+bitcoin = ["httpx>=0.27"]
+tron = ["httpx>=0.27", "pycryptodome>=3.20"]
+evm = ["httpx>=0.27", "pycryptodome>=3.20"]
+fast = ["coincurve>=20"]
 all = ["chainwatch-payments[bitcoin,tron,evm]"]
 test = ["pytest>=8"]
 
