@@ -303,3 +303,42 @@ def test_btc_and_erc20_share_nothing(http):
     http.on_get(f"https://blockstream.info/api/address/{btc_addr}/txs", [])
     assert reg.confirm("USDC", "ethereum", addr_eth, "1").state is State.CONFIRMED
     assert reg.confirm("BTC", "mainnet", btc_addr, "1").state is State.NONE
+
+
+def test_evm_since_height_scans_only_new_blocks(http):
+    addr = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94"
+    rpc = FakeRpc(head=10_000, logs=[erc20_log(addr, 1_000_000, 9_990)])
+    b, reg = make_evm(http, rpc, chunk_size=2_000)
+    assert reg.current_height("USDC", "ethereum") == 10_000
+    s = reg.confirm("USDC", "ethereum", addr, "1", since_height=9_950)
+    assert rpc.get_logs_ranges == [(9_950, 10_000)]          # one call, not ten
+    assert s.state is State.SEEN and s.tx_ids == ("0xabc",)
+
+
+def test_since_height_is_ignored_by_non_scanning_backends(btc, http):
+    b, reg = btc
+    addr = b.derive_address(0)
+    http.on_get(f"{ESPLORA}/blocks/tip/height", 100)
+    http.on_get(f"{ESPLORA}/address/{addr}/txs", [])
+    assert reg.current_height("BTC", "testnet") is None
+    assert reg.confirm("BTC", "testnet", addr, "0.001", since_height=50).state is State.NONE
+
+
+def test_trongrid_deep_transfers_skip_per_tx_lookups(http):
+    b = TronTRC20Backend(TRX_XPUB, http=http)
+    addr = b.derive_address(5)
+    head_ts = 1_792_352_913_000
+    http.on_post(f"{TRONGRID}/wallet/getnowblock",
+                 {"block_header": {"raw_data": {"number": 87_226_633, "timestamp": head_ts}}})
+    old = trc20_row("old", addr, 7_000_000)
+    old["block_timestamp"] = head_ts - 3_600_000            # an hour ago: ~1200 blocks deep
+    new = trc20_row("new", addr, 3_000_000)
+    new["block_timestamp"] = head_ts - 30_000               # 30 s ago: needs the exact lookup
+    http.on_get(f"{TRONGRID}/v1/accounts/{addr}/transactions/trc20", {"data": [new, old], "meta": {}})
+    looked_up = []
+    http.on_post(f"{TRONGRID}/wallet/gettransactioninfobyid",
+                 lambda p: looked_up.append(p["value"]) or {"blockNumber": 87_226_624, "receipt": {"result": "SUCCESS"}})
+    transfers = {t.tx_id: t for t in b.get_incoming(addr)}
+    assert looked_up == ["new"]
+    assert transfers["old"].confirmations == 1201 and transfers["old"].block_height == 87_226_633 - 1200
+    assert transfers["new"].confirmations == 10

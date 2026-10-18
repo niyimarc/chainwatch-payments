@@ -18,6 +18,14 @@ class Backend(Protocol):
 
     Implementations must be watch-only: they derive or hold PUBLIC
     information only and never sign or send anything.
+
+    Optional extras a backend MAY offer (the registry uses them only when present):
+
+    * ``current_height() -> int``: chain height, recorded when an address is
+      handed out;
+    * ``get_incoming(..., since_height=...)``: accept that height back as a hint
+      to scan only newer blocks (useful for log-scanning chains like ERC-20).
+      The registry passes ``since_height`` only when the caller supplies one.
     """
 
     def capabilities(self) -> Capabilities: ...

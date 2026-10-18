@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from ..backend import BaseBackend
 from ..crypto.bip32 import ExtendedPublicKey
@@ -85,7 +86,10 @@ class HDBackend(BaseBackend):
     def validate_address(self, address: str) -> bool:
         return self._validator(address)
 
-    def get_incoming(self, address: str, not_before: datetime | None = None) -> list[Transfer]:
+    def get_incoming(self, address: str, not_before: datetime | None = None,
+                     since_height: int | None = None) -> list[Transfer]:
+        """``since_height`` is a scanning hint (only backends that scan block
+        ranges, like ERC-20, use it); others ignore it."""
         if not self._validator(address):
             raise ValueError(f"invalid address for this backend: {address!r}")
         return self.source.incoming(address, not_before=not_before)

@@ -8,9 +8,9 @@ previous status as ``previous`` to have that flagged as ``reverted``.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Iterable
 
 from .types import Match, MatchMode, PaymentStatus, State, Tolerance, Transfer
 

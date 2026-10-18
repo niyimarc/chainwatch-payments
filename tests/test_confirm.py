@@ -22,7 +22,7 @@ from chainwatch_payments.backends import MockBackend
 
 @pytest.fixture
 def chain():
-    return MockBackend("BTC", "regtest", decimals=8, default_confirmations=3)
+    return MockBackend("BTC", "regtest", decimals=8, default_confirmations=3, fixed_times=True)
 
 
 @pytest.fixture

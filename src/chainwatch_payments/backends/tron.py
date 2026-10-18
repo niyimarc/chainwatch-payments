@@ -21,6 +21,8 @@ from ._common import ChainSource, HDBackend
 
 __all__ = ["TronTRC20Backend", "TronGridSource", "TRONGRID_URLS", "TRC20_TOKENS"]
 
+TRON_BLOCK_MS = 3000
+
 TRONGRID_URLS = {
     "mainnet": "https://api.trongrid.io",
     "nile": "https://nile.trongrid.io",
@@ -44,6 +46,7 @@ class TronGridSource:
         api_key: str | None = None,
         page_limit: int = 200,
         max_pages: int = 20,
+        deep_seconds: float = 600.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.contract = contract
@@ -51,6 +54,11 @@ class TronGridSource:
         self.api_key = api_key
         self.page_limit = page_limit
         self.max_pages = max_pages
+        # Transfers older than this are far past TRON's 19-block finality, so
+        # their confirmations are estimated from block time (3 s per block)
+        # instead of costing one gettransactioninfobyid call each. Transfer
+        # events only exist for successful executions, so no receipt is needed.
+        self.deep_seconds = deep_seconds
 
     @property
     def http(self) -> HttpClient:
@@ -62,12 +70,18 @@ class TronGridSource:
     def _headers(self) -> dict[str, str]:
         return {"TRON-PRO-API-KEY": self.api_key} if self.api_key else {}
 
-    def head_block(self) -> int:
+    def head(self) -> tuple[int, int | None]:
+        """(head block number, head block timestamp in ms or None)."""
         r = self.http.post_json(f"{self.base_url}/wallet/getnowblock", {}, headers=self._headers)
         try:
-            return int(r["block_header"]["raw_data"]["number"])
-        except (KeyError, TypeError, ValueError) as exc:
+            raw = r["block_header"]["raw_data"]
+            ts = raw.get("timestamp")
+            return int(raw["number"]), (int(ts) if ts is not None else None)
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
             raise ChainSourceError("unexpected getnowblock response") from exc
+
+    def head_block(self) -> int:
+        return self.head()[0]
 
     def tx_info(self, tx_id: str) -> dict[str, Any]:
         r = self.http.post_json(
@@ -107,7 +121,7 @@ class TronGridSource:
         ]
         if not rows:
             return []
-        head = self.head_block()
+        head, head_ts = self.head()
         seen: dict[str, int] = {}
         out: list[Transfer] = []
         infos: dict[str, dict[str, Any]] = {}
@@ -115,6 +129,15 @@ class TronGridSource:
             tx_id = r["transaction_id"]
             idx = seen.get(tx_id, 0)
             seen[tx_id] = idx + 1
+            row_ts = r.get("block_timestamp")
+            if head_ts is not None and row_ts is not None and head_ts - int(row_ts) >= self.deep_seconds * 1000:
+                confs = int((head_ts - int(row_ts)) // TRON_BLOCK_MS) + 1
+                out.append(Transfer(
+                    tx_id=tx_id, amount=int(r["value"]), confirmations=confs,
+                    timestamp=datetime.fromtimestamp(int(row_ts) / 1000, tz=timezone.utc),
+                    index=idx, block_height=max(head - confs + 1, 0),
+                ))
+                continue
             info = infos.get(tx_id)
             if info is None:
                 info = infos[tx_id] = self.tx_info(tx_id)

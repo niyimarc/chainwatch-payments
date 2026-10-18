@@ -1,7 +1,14 @@
 # chainwatch-payments
 
-Watch-only, multi-chain crypto payment detection for Python. No web framework,
-no payment gateway, no private keys.
+Watch-only, multi-chain crypto payment detection for Python. No payment
+gateway, no private keys. The core is framework-neutral.
+
+Optional extras add:
+* **`[django]`:** invoice models, a poll command and signals;
+* **`[forwarder]`:** an opt-in TRON forwarder. This is the only part that holds
+  keys, and it runs in its own process.
+
+The Django setup is documented in [DJANGO_DOC.md](DJANGO_DOC.md).
 
 It does two things, for whichever coins and networks you enable:
 
@@ -11,8 +18,10 @@ It does two things, for whichever coins and networks you enable:
    with confirmation counts, reorg handling and an under/over-payment
    tolerance band.
 
-Everything else (plans, invoices, pricing, renewals, what to do on
-non-payment) belongs to your application.
+It also includes optional pricing helpers (CoinGecko and fixed stablecoin
+rates, plus a quote calculator) and the Django integration. Plans,
+subscriptions, renewals and what to do on non-payment stay in your
+application.
 
 ```
 pip install chainwatch-payments                # core only, zero dependencies
@@ -20,6 +29,8 @@ pip install "chainwatch-payments[bitcoin]"     # + BTC default source
 pip install "chainwatch-payments[tron]"        # + TRON TRC-20 default source
 pip install "chainwatch-payments[evm]"         # + Ethereum/EVM ERC-20 default source
 pip install "chainwatch-payments[all]"
+pip install "chainwatch-payments[django]"     # + Django integration
+pip install "chainwatch-payments[forwarder]"  # + opt-in TRON forwarder (holds keys; read "Forwarding")
 pip install "chainwatch-payments[fast]"       # optional libsecp256k1 speed-up
 ```
 
@@ -60,8 +71,9 @@ server.
 | anything | `MockBackend` | simulated | in-memory chain | configurable |
 
 Token presets: USDT on TRON mainnet and Nile; USDT and USDC on Ethereum; USDC
-on Sepolia. Any other token: pass `contract=` and `decimals=`. **Check contract
-addresses against the issuer's official list before going live.**
+on Sepolia, all verified against the issuers (see "Verified presets and live
+check"). Any other token: pass `contract=` and `decimals=`, and verify that
+contract yourself.
 
 **Using your own node:** every shipped backend takes a `source=` (or
 `base_url=` / `rpc_url=`). Point `EsploraSource` at your own `electrs` or
@@ -231,26 +243,163 @@ shared by every backend, so a new chain only has to report transfers.
 * **BTC** credits are counted per output; change outputs to other addresses in
   the same transaction are ignored.
 
+## Pricing (framework-neutral)
+
+Turn a fiat price into the exact crypto amount to request:
+
+```python
+from chainwatch_payments import (ChainedPriceProvider, CoinGeckoProvider, CrossCheckedPriceProvider,
+                                 FixedRateProvider, KrakenProvider, quote)
+
+prices = ChainedPriceProvider([
+    FixedRateProvider(),                              # USDT/USDC = 1 USD, no API call
+    CrossCheckedPriceProvider(
+        CoinGeckoProvider("your-demo-key"),           # primary, cached 60 s
+        KrakenProvider(),                             # reference
+        max_deviation="0.02",                         # refuse to quote if they differ by > 2%
+    ),
+])
+rate = prices.rate("BTC", "USD")                      # Decimal, fiat per 1 BTC
+
+q = quote(asset="BTC", fiat="USD", fiat_price="20", rate=rate, decimals=8,
+          volatility_buffer="0.01",                   # +1% for price movement during the payment window
+          network_fee_fiat="0.90")                    # passed on to the customer
+q.total_amount   # (20 * 1.01 + 0.90) / rate, rounded UP to 8 decimals
+```
+
+If a rate can't be fetched, or the two sources disagree, `PriceUnavailable` is
+raised: never quote without a trustworthy price. CoinGecko plans: no key
+(`plan="public"`, development only), a free Demo key (`plan="demo"`, the
+default when a key is given) or a paid key (`plan="pro"`). Kraken needs no
+key. Any object with `rate(asset, fiat) -> Decimal` can be a provider.
+
+### Dynamic network fees
+
+The fee you pass on can follow the network instead of being a fixed number:
+
+```python
+from chainwatch_payments.fees import MempoolSpaceFeeEstimator, TronEnergyFeeEstimator, estimate_fee_fiat
+
+btc_fee = estimate_fee_fiat(MempoolSpaceFeeEstimator(), fiat="USD", prices=prices,
+                            minimum=Decimal("0.50"), margin=Decimal("0.2"))
+```
+
+`estimate_fee_fiat` returns `max(minimum, estimate * (1 + margin))`. If the
+estimator fails it falls back to the minimum.
+
+* **BTC (`MempoolSpaceFeeEstimator`):** mempool.space's recommended sat/vB
+  (default target `halfHourFee`) times `vbytes` (default 110, a
+  1-input/1-output transaction).
+* **TRON (`TronEnergyFeeEstimator`):** the chain's current energy and
+  bandwidth prices times the energy and bandwidth one USDT transfer uses
+  (defaults 130,000 energy and 350 bytes). The energy default comes from a
+  real mainnet USDT transfer in October 2026: TRON adds a dynamic-energy
+  penalty on busy contracts, so the cost is about twice the 65,000 base.
+
+## Async (FastAPI and friends)
+
+```python
+from chainwatch_payments.aio import AsyncPaymentRegistry
+
+areg = AsyncPaymentRegistry(registry)
+status = await areg.confirm("BTC", "mainnet", address, "0.001")
+results = await areg.confirm_many([dict(asset="BTC", network="mainnet", address=a, expected_amount="0.001")
+                                   for a in addresses], concurrency=8)
+```
+
+Chain reads use blocking HTTP, so each call runs in a worker thread
+(`asyncio.to_thread`) and your event loop stays free. In `confirm_many`, a
+failed read comes back as the exception in its position; the other results
+are kept.
+
+## Django integration
+
+The optional `[django]` extra turns the package into a reusable Django app:
+an abstract invoice model to inherit, `create_invoice()` at checkout, a
+`chainwatch_poll` command, signals such as `invoice_paid`, late-payment
+pricing at the price when the payment arrived, an audit trail, an admin
+mixin and the opt-in TRON forwarder.
+
+```
+pip install "chainwatch-payments[django,bitcoin,tron]"
+```
+
+**Full setup guide: [DJANGO_DOC.md](DJANGO_DOC.md)**, covering installation,
+the settings reference, the model, checkout, polling, signals, statuses, late
+payments, single-address mode, the admin, forwarding and security notes.
+
+## Verified presets and live check
+
+The token contract presets were checked against the issuers in October 2026:
+
+| Preset | Contract | Source |
+|---|---|---|
+| USDT on TRON | `TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t` | Tether's supported-protocols page |
+| USDT on Ethereum | `0xdAC17F958D2ee523a2206206994597C13D831ec7` | Tether's supported-protocols page |
+| USDC on Ethereum | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | Circle's USDC contract addresses page |
+| USDC on Sepolia | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` | Circle's USDC contract addresses page |
+| USDT on TRON Nile | `TXYZopYRdj2D9XRtbG411XZZ3kM5VkAeBf` | On chain: token "Tether USD", 6 decimals (the standard Nile test token) |
+
+The API formats the package reads (Esplora, TronGrid, TRON chain parameters,
+mempool.space, Kraken and CoinGecko) were also checked against the live
+services and their docs.
+
+Before going live, run the read-only check yourself. It needs no keys or funds:
+
+```
+pip install -e ".[all]"
+python scripts/live_check.py        # add -v for tracebacks
+```
+
+It reads real data on BTC mainnet and testnet4, TRON mainnet and Nile,
+Ethereum mainnet and Sepolia, mempool.space, CoinGecko and Kraken, and prints
+PASS or FAIL per check. Then do one real payment per chain on a testnet
+(testnet4, Nile, Sepolia) with your own wallet, and confirm the address the
+package shows matches your wallet's address for that index.
+
 ## Testing
 
 ```
-pip install -e ".[all,test]"
+pip install -e ".[all,django,forwarder,test]"
 pytest
 ```
 
-The suite never touches a real chain: chain access is mocked at the HTTP layer
-(and a guard fails any test that tries to build a real client). It covers
-registry routing, derivation vectors (BIP32 test vector 1, BIP44/49/84, ETH,
-TRON; on both the accelerated and pure-Python paths), NONE/SEEN/CONFIRMED
-transitions, tolerance bands, reorg reversal, idempotency, `not_before`, both
-single-address discriminators, and several backends enabled at once. Use
-testnets (BTC testnet/testnet4/signet, TRON Nile, Sepolia) for manual checks.
+The suite never touches a real chain or price feed: everything is mocked at
+the HTTP layer, and a guard fails any test that tries to build a real
+client.
+
+* **Core:** routing, derivation vectors (BIP32/44/49/84, ETH, TRON, on both the
+  accelerated and pure-Python paths), confirmation states, tolerance, reorgs,
+  idempotency, discriminators, retries, pricing, cross-checks, fee estimators,
+  the async facade and forwarder key derivation.
+* **Django** (needs Django and pytest-django; skipped otherwise):
+  * creation, index allocation and every status transition;
+  * payment-time pricing for late payments, both late rules and their windows;
+  * backoff, the audit trail, the gap warning and single-address mode;
+  * dynamic fees, signals firing once, failure isolation;
+  * commands, admin and the forwarder (once-only, retries, config checks).
+
+By default the Django tests use SQLite. To run them on PostgreSQL, including
+the concurrency tests that hammer index allocation from parallel threads:
+
+```
+CHAINWATCH_TEST_POSTGRES=localhost:5432 pytest tests/django_tests   # user postgres, trust auth
+```
+
+CI (`.github/workflows/ci.yml`) runs:
+* ruff and mypy;
+* the core with no extras on Python 3.10 to 3.14;
+* everything with all extras on Python 3.10 to 3.14;
+* Django 4.2;
+* PostgreSQL;
+* a build plus `twine check`.
 
 ## Versioning
 
-Semantic versioning. `0.x` while the API settles: minor versions may change the
-public interface, patch versions will not.
+Semantic versioning; see `CHANGELOG.md`. While the version is `0.0.x` the API
+may still change between releases. The version is defined once, in
+`src/chainwatch_payments/__init__.py` (`__version__`).
 
 ## Licence
 
-MIT
+MIT; see `LICENSE`.

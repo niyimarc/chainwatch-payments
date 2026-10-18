@@ -1,10 +1,77 @@
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 
 from chainwatch_payments.crypto import secp256k1
+
+# Django integration tests run only when Django and pytest-django are installed
+# (pip install -e ".[django,test]"); otherwise they are skipped from collection.
+try:
+    import django  # noqa: F401
+    import pytest_django  # noqa: F401
+except ImportError:
+    collect_ignore = ["django_tests"]
+    _HAVE_DJANGO = False
+else:
+    _HAVE_DJANGO = True
+
+
+def _test_database():
+    """SQLite in memory by default. Set CHAINWATCH_TEST_POSTGRES=host:port (user
+    postgres, trust auth) to run the Django tests against PostgreSQL, which
+    also enables the real concurrency test."""
+    import os
+
+    pg = os.environ.get("CHAINWATCH_TEST_POSTGRES")
+    if pg:
+        host, _, port = pg.partition(":")
+        return {"ENGINE": "django.db.backends.postgresql", "NAME": "chainwatch", "USER": "postgres",
+                "HOST": host, "PORT": port or "5432"}
+    return {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}
+
+
+def pytest_configure(config):
+    if not _HAVE_DJANGO:
+        return
+    from django.conf import settings
+
+    if settings.configured:
+        return
+    settings.configure(
+        INSTALLED_APPS=[
+            "django.contrib.contenttypes",
+            "django.contrib.auth",
+            "django.contrib.sessions",
+            "django.contrib.messages",
+            "django.contrib.admin",
+            "chainwatch_payments.contrib.django",
+            "tests.django_tests.testapp",
+        ],
+        DATABASES={"default": _test_database()},
+        USE_TZ=True,
+        TIME_ZONE="UTC",
+        DEFAULT_AUTO_FIELD="django.db.models.BigAutoField",
+        CHAINWATCH={
+            "BACKENDS": {
+                "BTC:regtest": {"type": "mock", "options": {"asset": "BTC", "network": "regtest",
+                                                            "decimals": 8, "default_confirmations": 2},
+                                "volatility_buffer": "0.01", "network_fee": "0.90"},
+                "USDT:tron": {"type": "mock", "options": {"asset": "USDT", "network": "tron",
+                                                          "decimals": 6, "default_confirmations": 19},
+                              "network_fee": "1.50", "underpay_tolerance": "0.01"},
+                "USDT:shared": {"type": "mock", "options": {"asset": "USDT", "network": "shared", "decimals": 6,
+                                                            "default_confirmations": 1, "hd": False,
+                                                            "single_address": "TSHAREDADDRESS"},
+                                "address_mode": "single", "amount_step": "0.0001", "max_slots": 3},
+            },
+            "PRICE_PROVIDER": "fixed",
+            "FIXED_RATES": {"USDT:USD": "1", "BTC:USD": "100000"},
+            "INVOICE_MODELS": ["testapp.Invoice"],
+        },
+    )
 
 # Account-level public keys for the well-known BIP39 test mnemonic
 # "abandon abandon ... abandon about" (no passphrase). Public data only.
@@ -69,4 +136,6 @@ def _no_real_network(monkeypatch):
 
     for mod in ("bitcoin", "tron", "evm"):
         monkeypatch.setattr(f"chainwatch_payments.backends.{mod}.default_http_client", boom)
+    monkeypatch.setattr("chainwatch_payments.pricing.default_http_client", boom)
+    monkeypatch.setattr("chainwatch_payments.fees.default_http_client", boom, raising=False)
     monkeypatch.setattr(h, "default_http_client", boom)

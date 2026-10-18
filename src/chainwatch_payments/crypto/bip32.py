@@ -49,7 +49,7 @@ class ExtendedPublicKey:
 
     # -- parsing / serialisation -------------------------------------------
     @classmethod
-    def parse(cls, s: str) -> "ExtendedPublicKey":
+    def parse(cls, s: str) -> ExtendedPublicKey:
         s = s.strip()
         raw = b58check_decode(s)
         if len(raw) != 78:
@@ -100,7 +100,7 @@ class ExtendedPublicKey:
         return hash160(self.public_key)[:4]
 
     # -- derivation ----------------------------------------------------------
-    def child(self, index: int) -> "ExtendedPublicKey":
+    def child(self, index: int) -> ExtendedPublicKey:
         if not 0 <= index < HARDENED:
             raise ValueError(
                 "only non-hardened indexes (0 .. 2^31-1) can be derived from a public key"
@@ -126,7 +126,7 @@ class ExtendedPublicKey:
             public_key=child_key,
         )
 
-    def derive(self, path: str | list[int]) -> "ExtendedPublicKey":
+    def derive(self, path: str | list[int]) -> ExtendedPublicKey:
         """Derive a relative non-hardened path such as ``"0/5"`` or ``[0, 5]``."""
         if isinstance(path, str):
             p = path.strip()

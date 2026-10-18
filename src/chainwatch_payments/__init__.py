@@ -21,6 +21,17 @@ from .errors import (
     PrivateKeyRejected,
     UnsupportedCapability,
 )
+from .pricing import (
+    ChainedPriceProvider,
+    CoinGeckoProvider,
+    CrossCheckedPriceProvider,
+    FixedRateProvider,
+    KrakenProvider,
+    PriceProvider,
+    PriceUnavailable,
+    Quote,
+    quote,
+)
 from .registry import PaymentRegistry
 from .types import (
     AddressMode,
@@ -35,7 +46,7 @@ from .types import (
     to_base_units,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.0.2"
 
 __all__ = [
     "__version__",
@@ -48,6 +59,10 @@ __all__ = [
     "MatchMode", "Tolerance", "to_base_units", "from_base_units",
     # logic
     "evaluate", "unique_amount",
+    # pricing
+    "PriceProvider", "FixedRateProvider", "CoinGeckoProvider", "ChainedPriceProvider",
+    "KrakenProvider", "CrossCheckedPriceProvider",
+    "PriceUnavailable", "Quote", "quote",
     # errors
     "ChainwatchError", "BackendNotFound", "BackendAlreadyRegistered",
     "UnsupportedCapability", "ChainSourceError", "MissingDependency", "PrivateKeyRejected",

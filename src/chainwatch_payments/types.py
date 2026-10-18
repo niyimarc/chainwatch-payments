@@ -91,16 +91,16 @@ class Tolerance:
     over_rel: Decimal = Decimal(0)
 
     @classmethod
-    def exact(cls) -> "Tolerance":
+    def exact(cls) -> Tolerance:
         return cls()
 
     @classmethod
-    def absolute(cls, under: Decimal | str | int, over: Decimal | str | int | None = None) -> "Tolerance":
+    def absolute(cls, under: Decimal | str | int, over: Decimal | str | int | None = None) -> Tolerance:
         u = Decimal(str(under))
         return cls(under_abs=u, over_abs=Decimal(str(over)) if over is not None else u)
 
     @classmethod
-    def relative(cls, under: Decimal | str | float, over: Decimal | str | float | None = None) -> "Tolerance":
+    def relative(cls, under: Decimal | str | float, over: Decimal | str | float | None = None) -> Tolerance:
         u = Decimal(str(under))
         return cls(under_rel=u, over_rel=Decimal(str(over)) if over is not None else u)
 

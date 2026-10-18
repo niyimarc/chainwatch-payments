@@ -91,6 +91,17 @@ class PaymentRegistry:
             raise UnsupportedCapability(f"{_key(asset, network)} does not support memos/tags")
         return backend.address_with_memo(reference)
 
+    def current_height(self, asset: str, network: str) -> int | None:
+        """Chain height if the backend can report it (used as a scan start
+        hint), else None."""
+        fn = getattr(self.get(asset, network), "current_height", None)
+        if fn is None:
+            return None
+        try:
+            return int(fn())
+        except AttributeError:
+            return None
+
     # -- confirmation ------------------------------------------------------------
     def confirm(
         self,
@@ -105,6 +116,7 @@ class PaymentRegistry:
         memo: str | None = None,
         match_mode: MatchMode = MatchMode.SUM,
         previous: PaymentStatus | None = None,
+        since_height: int | None = None,
     ) -> PaymentStatus:
         """Read the chain and report the payment status for ``address``.
 
@@ -119,7 +131,12 @@ class PaymentRegistry:
         caps = backend.capabilities()
         required = caps.default_confirmations if required_confirmations is None else required_confirmations
         expected = to_base_units(expected_amount, caps.decimals)
-        transfers = backend.get_incoming(address, not_before=not_before)
+        if since_height is not None:
+            # optional scan hint; only passed when the caller has one (see Backend docs)
+            transfers = backend.get_incoming(  # type: ignore[call-arg]
+                address, not_before=not_before, since_height=since_height)
+        else:
+            transfers = backend.get_incoming(address, not_before=not_before)
         return evaluate(
             transfers,
             asset=k[0],

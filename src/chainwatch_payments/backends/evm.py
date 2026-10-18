@@ -96,9 +96,18 @@ class JsonRpcSource:
             back = math.ceil(secs / self.block_time * 1.25) + 100
         return max(self.start_block, head - back + 1, 0)
 
-    def incoming(self, address: str, not_before: datetime | None = None) -> list[Transfer]:
-        head = int(self.rpc("eth_blockNumber", []), 16)
-        start = self._start(head, not_before)
+    def head(self) -> int:
+        return int(self.rpc("eth_blockNumber", []), 16)
+
+    def incoming(self, address: str, not_before: datetime | None = None,
+                 since_height: int | None = None) -> list[Transfer]:
+        head = self.head()
+        if since_height is not None:
+            # caller recorded the height when the address was handed out:
+            # nothing before it can belong to this address' payment
+            start = max(self.start_block, since_height, 0)
+        else:
+            start = self._start(head, not_before)
         to_topic = "0x" + "0" * 24 + address.lower()[2:]
         logs: list[dict[str, Any]] = []
         frm = start
@@ -204,3 +213,20 @@ class ERC20Backend(HDBackend):
             validator=is_valid_evm_address,
             path_template=path_template,
         )
+
+    def current_height(self) -> int:
+        """Current block height; store it when creating an invoice and pass it
+        back as ``since_height`` so each check scans only new blocks."""
+        head = getattr(self.source, "head", None)
+        if head is None:
+            raise AttributeError("this source cannot report the chain height")
+        return head()
+
+    def get_incoming(self, address: str, not_before: datetime | None = None,
+                     since_height: int | None = None) -> list[Transfer]:
+        if not self.validate_address(address):
+            raise ValueError(f"invalid address for this backend: {address!r}")
+        if since_height is not None:
+            return self.source.incoming(  # type: ignore[call-arg]
+                address, not_before=not_before, since_height=since_height)
+        return self.source.incoming(address, not_before=not_before)
