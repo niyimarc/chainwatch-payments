@@ -104,6 +104,11 @@ class HttpxClient:
     def post_json(self, url, payload, headers=None):
         return self._call("POST", url, json=payload, headers=dict(headers or {}))
 
+    def post_text(self, url: str, body: str, headers: Mapping[str, str] | None = None) -> Any:
+        """POST a raw text body (e.g. a hex transaction to Esplora's /tx)."""
+        h = {"content-type": "text/plain", **dict(headers or {})}
+        return self._call("POST", url, content=body.encode(), headers=h)
+
     def close(self) -> None:
         self._client.close()
 

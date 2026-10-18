@@ -8,7 +8,7 @@ from chainwatch_payments.contrib.django.forwarding import forward_paid_invoices
 
 
 class Command(BaseCommand):
-    help = ("Forward paid TRON payments from their one-time addresses to your wallet "
+    help = ("Forward paid payments (TRON, BTC, ERC-20) from their one-time addresses to your wallet "
             "(opt-in; needs CHAINWATCH['FORWARDERS'] and the mnemonic env var).")
 
     def add_arguments(self, parser):
@@ -25,7 +25,8 @@ class Command(BaseCommand):
         while True:
             for model in targets:
                 r = forward_paid_invoices(model, limit=limit, include_underpaid=include_underpaid)
-                self.stdout.write(f"forwarded={r.forwarded} nothing={r.nothing} errors={r.errors}")
+                self.stdout.write(f"forwarded={r.forwarded} sent={r.sent} nothing={r.nothing} "
+                                  f"deferred={r.deferred} errors={r.errors}")
             if not loop:
                 return
             time.sleep(interval)

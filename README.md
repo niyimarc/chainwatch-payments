@@ -5,8 +5,9 @@ gateway, no private keys. The core is framework-neutral.
 
 Optional extras add:
 * **`[django]`:** invoice models, a poll command and signals;
-* **`[forwarder]`:** an opt-in TRON forwarder. This is the only part that holds
-  keys, and it runs in its own process.
+* **`[forwarder]`:** opt-in forwarders that move received funds to your wallet
+  (TRON, BTC, ERC-20). This is the only part that holds keys, and it runs in
+  its own process.
 
 The Django setup is documented in [DJANGO_DOC.md](DJANGO_DOC.md).
 
@@ -30,7 +31,7 @@ pip install "chainwatch-payments[tron]"        # + TRON TRC-20 default source
 pip install "chainwatch-payments[evm]"         # + Ethereum/EVM ERC-20 default source
 pip install "chainwatch-payments[all]"
 pip install "chainwatch-payments[django]"     # + Django integration
-pip install "chainwatch-payments[forwarder]"  # + opt-in TRON forwarder (holds keys; read "Forwarding")
+pip install "chainwatch-payments[forwarder]"  # + opt-in forwarders, TRON/BTC/ERC-20 (hold keys; see DJANGO_DOC.md)
 pip install "chainwatch-payments[fast]"       # optional libsecp256k1 speed-up
 ```
 
@@ -318,7 +319,8 @@ The optional `[django]` extra turns the package into a reusable Django app:
 an abstract invoice model to inherit, `create_invoice()` at checkout, a
 `chainwatch_poll` command, signals such as `invoice_paid`, late-payment
 pricing at the price when the payment arrived, an audit trail, an admin
-mixin and the opt-in TRON forwarder.
+mixin and opt-in forwarders that move funds to your wallet (TRON, BTC,
+ERC-20).
 
 ```
 pip install "chainwatch-payments[django,bitcoin,tron]"
@@ -371,13 +373,16 @@ client.
 * **Core:** routing, derivation vectors (BIP32/44/49/84, ETH, TRON, on both the
   accelerated and pure-Python paths), confirmation states, tolerance, reorgs,
   idempotency, discriminators, retries, pricing, cross-checks, fee estimators,
-  the async facade and forwarder key derivation.
+  the async facade and the forwarders. Bitcoin signatures are checked against
+  a separate BIP143 implementation with a different ECDSA library, and
+  Ethereum transactions are decoded and their signer recovered.
 * **Django** (needs Django and pytest-django; skipped otherwise):
   * creation, index allocation and every status transition;
   * payment-time pricing for late payments, both late rules and their windows;
   * backoff, the audit trail, the gap warning and single-address mode;
   * dynamic fees, signals firing once, failure isolation;
-  * commands, admin and the forwarder (once-only, retries, config checks).
+  * commands, admin and the forwarders (once-only, sent to confirmed,
+    dropped retries, waiting on fees without using up attempts, config checks).
 
 By default the Django tests use SQLite. To run them on PostgreSQL, including
 the concurrency tests that hammer index allocation from parallel threads:

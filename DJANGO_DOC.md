@@ -3,7 +3,7 @@
 This guide covers the optional Django integration of
 [chainwatch-payments](README.md): installing the app, every setting,
 the invoice model, creating and polling invoices, signals, late-payment
-pricing, single-address mode, the admin and the opt-in TRON forwarder.
+pricing, single-address mode, the admin and the opt-in forwarders (TRON, BTC, ERC-20).
 
 For the framework-neutral core (backends, `PaymentRegistry.confirm`, pricing
 and fee helpers), see the [README](README.md).
@@ -14,6 +14,7 @@ and fee helpers), see the [README](README.md).
 - [2. Configure CHAINWATCH](#2-configure-chainwatch)
 - [3. Inherit the invoice model](#3-inherit-the-invoice-model)
 - [4. Create an invoice at checkout](#4-create-an-invoice-at-checkout)
+- [Letting the customer choose a coin](#letting-the-customer-choose-a-coin)
 - [5. Poll in the background](#5-poll-in-the-background)
 - [6. React to payments with signals](#6-react-to-payments-with-signals)
 - [Statuses](#statuses)
@@ -22,7 +23,7 @@ and fee helpers), see the [README](README.md).
 - [Gap limit](#gap-limit)
 - [Audit trail](#audit-trail)
 - [Admin](#admin)
-- [Forwarding (opt-in, TRON)](#forwarding-opt-in-tron)
+- [Forwarding (opt-in)](#forwarding-opt-in)
 - [Security notes](#security-notes)
 
 ```
@@ -51,11 +52,12 @@ INSTALLED_APPS = [
 ]
 ```
 
-Then run `python manage.py migrate`. This creates three small tables:
+Then run `python manage.py migrate`. This creates four small tables:
 
 * `chainwatch_derivationcounter`: hands out address indexes;
 * `chainwatch_invoiceevent`: the audit trail;
-* `chainwatch_forwardrecord`: used only by the optional forwarder.
+* `chainwatch_forwardrecord` and `chainwatch_forwardevent`: used only by the
+  optional forwarders.
 
 ## 2. Configure `CHAINWATCH`
 
@@ -110,7 +112,7 @@ silently ignored. Amounts and percentages must be strings or `Decimal`
 | `PRICE_MAX_DEVIATION` | `"0.02"` | Refuse to quote when the two sources differ by more than this fraction. |
 | `PRICE_REQUIRE_CROSS_CHECK` | `False` | If `True`, refuse to quote when the cross-check source is down. If `False`, log a warning and use the primary. |
 | `QUOTE_MINUTES` | `20` | How long a quote is valid. |
-| `START_INDEX` | `1` | First address index. Index 0 is left for your wallet's own first address (and is the forwarder's gas wallet). |
+| `START_INDEX` | `1` | First address index. Index 0 is left for your wallet's own first address (and is the TRON/ERC-20 forwarders' gas wallet). |
 | `LATE_PAYMENT_HOURS` | `72` | Default late-payment window (each chain can override it). |
 | `LATE_PAYMENT_PRICING` | `"at_payment"` | Default late-payment rule: `"at_payment"` or `"locked"` (see below; each chain can override it). |
 | `REORG_WATCH_HOURS` | `6` | How long paid invoices keep being re-checked in case a payment is reversed. |
@@ -120,7 +122,7 @@ silently ignored. Amounts and percentages must be strings or `Decimal`
 | `POLL_INTERVAL_SECONDS` | `30` | Seconds between runs with `--loop`. |
 | `LATE_RECHECK_SECONDS` | `300` | Expired/underpaid invoices are re-checked at most this often. |
 | `PAID_RECHECK_SECONDS` | `600` | Paid invoices (reorg watch) are re-checked at most this often. |
-| `FORWARDERS` | `{}` | Opt-in forwarder configuration; see "Forwarding". |
+| `FORWARDERS` | `{}` | Opt-in forwarders per chain; see "Forwarding". |
 | `FORWARD_MAX_ATTEMPTS` | `5` | After this many failed attempts a forward is marked `failed` and left for you. |
 
 Each `BACKENDS` entry takes these keys:
@@ -141,6 +143,8 @@ Each `BACKENDS` entry takes these keys:
 | `address_mode` | `"hd"` | `"hd"` (one address per invoice, needs `xpub`) or `"single"` (one shared address, needs `address`). |
 | `amount_step` | smallest unit | Single mode: amount added per slot, e.g. `"0.0001"`. Must be larger than `underpay_tolerance`. |
 | `max_slots` | `1000` | Single mode: how many invoices can be open on the address at once. |
+| `label` | automatic | Name shown at checkout, e.g. `"Tether (TRC-20)"`. Automatic: `"BTC"`, `"USDT (TRC-20)"`, `"USDC (ERC-20)"`, with the network added for testnets. |
+| `checkout` | `True` | `False` hides this coin from `payment_options()` (and `parse_option()` rejects it). It is still watched, so invoices already created for it keep updating. |
 
 ## 3. Inherit the invoice model
 
@@ -209,6 +213,64 @@ In one transaction this:
 
 If the price can't be fetched, nothing is created. Always create invoices this
 way, not with `Invoice.objects.create`.
+
+### Letting the customer choose a coin
+
+Every coin in `BACKENDS` can be offered at checkout, in the order you list
+them. Each invoice is for one coin, so the customer picks first and you create
+the invoice for their pick.
+
+```python
+from chainwatch_payments.contrib.django.checkout import parse_option, payment_choices, quote_options
+from chainwatch_payments.contrib.django.services import create_invoice
+
+class PayForm(forms.Form):
+    coin = forms.ChoiceField(choices=payment_choices)   # [("BTC:mainnet", "BTC"), ("USDT:tron", "USDT (TRC-20)"), ...]
+
+def choose_coin(request, plan):
+    # preview only: no invoice is created and no address is used
+    quotes = quote_options(plan.price, "USD")
+    return render(request, "billing/choose_coin.html", {"quotes": quotes, "form": PayForm()})
+
+def pay(request, plan):
+    form = PayForm(request.POST)
+    if not form.is_valid():
+        return redirect("choose_coin", plan.pk)
+    asset, network = parse_option(form.cleaned_data["coin"])
+    invoice = create_invoice(Invoice, asset=asset, network=network, fiat_price=plan.price, user=request.user)
+    return redirect("invoice_detail", invoice.pk)
+```
+
+In the template, each quote has `option.key`, `option.label`, `total_amount`,
+`rate`, `network_fee_fiat` and `option.confirmations`:
+
+```django
+{% for q in quotes %}
+  {% if q.error %}{{ q.option.label }}: temporarily unavailable
+  {% else %}{{ q.option.label }}: {{ q.total_amount }} {{ q.option.asset }}{% endif %}
+{% endfor %}
+```
+
+| Helper | What it does |
+|---|---|
+| `payment_options()` | The coins offered (`checkout` not `False`), as `PaymentOption(key, asset, network, label, decimals, confirmations)`. |
+| `payment_choices()` | The same as `[(key, label), ...]` for a `ChoiceField`. |
+| `parse_option(key)` | `"USDT:tron"` to `("USDT", "tron")`. Raises `ValueError` for anything not offered, so a tampered form can't pick another coin. |
+| `quote_invoice(asset=, network=, fiat_price=, fiat_currency="USD")` | What an invoice for that coin would ask for right now. Raises `PriceUnavailable`. |
+| `quote_options(fiat_price, fiat_currency="USD")` | `quote_invoice` for every offered coin. A coin whose price is down comes back with `error` set and `total_amount` 0, instead of failing the page. |
+
+Things to know:
+
+* **A quote is a preview.** `create_invoice` fetches the rate again, and the
+  invoice's `total_price` is what the customer must send. Rates are cached for
+  `PRICE_CACHE_SECONDS` (60 s), so the two normally match.
+* **Never create an invoice per coin just to show prices.** In HD mode every
+  invoice uses up an address, and unused ones build towards the gap limit.
+  Use `quote_options()` for the choice screen.
+* **Single-address mode** adds a tiny slot amount at creation, so its quotes
+  have `exact=False`; always show the invoice's `total_price` on the payment page.
+* **Changing coin** means creating a new invoice. The old one simply expires
+  unpaid (if the customer still pays it, it is handled as a late payment as usual).
 
 ## 5. Poll in the background
 
@@ -366,11 +428,23 @@ This gives:
 The index counter, the audit trail and the forward records also appear in the
 admin, read-only.
 
-## Forwarding (opt-in, TRON)
+## Forwarding (opt-in)
 
-With one address per invoice on TRON, the money ends up spread across many
-addresses. The forwarder moves each paid invoice's USDT to your own wallet
-automatically.
+With one address per invoice, received money is spread across many
+addresses. A forwarder moves each paid invoice's funds to **your own
+wallet** automatically. It's available for every shipped chain type; you
+switch it on per chain in `FORWARDERS`.
+
+| Chain type | Who pays the network fee | Extra to install |
+|---|---|---|
+| TRON TRC-20 (USDT) | A **gas wallet** (index 0) sends TRX to the deposit address | `forwarder-tron` |
+| EVM ERC-20 (USDT/USDC on Ethereum, Polygon, ...) | A **gas wallet** (index 0) sends ETH (or the chain's coin) | `forwarder-evm` |
+| Bitcoin (native SegWit) | Taken from the coins themselves; no gas wallet | `forwarder-btc` |
+
+```
+pip install "chainwatch-payments[django,tron,forwarder]"   # all three forwarders
+pip install "chainwatch-payments[forwarder-btc]"           # or just the ones you use
+```
 
 **It holds keys, unlike everything else in this package:**
 * It runs **only** in its own process, `python manage.py chainwatch_forward --loop`.
@@ -378,54 +452,176 @@ automatically.
   internet.
 * The mnemonic is read from an environment variable that **only that
   process** has. Your web app never sees it.
-* Use a **dedicated** wallet's seed, never your savings wallet.
+* Use a **dedicated** wallet's seed, never your savings wallet. One seed can
+  serve all chains: each chain uses its own standard account path.
 
-```
-pip install "chainwatch-payments[django,tron,forwarder]"
-```
+### Configuration
 
 ```python
 CHAINWATCH = {
     ...,
     "FORWARDERS": {
         "USDT:tron": {
-            "mnemonic_env": "CHAINWATCH_TRON_MNEMONIC",   # the NAME of the env var, not the words
+            "mnemonic_env": "CHAINWATCH_FORWARDER_MNEMONIC",   # the NAME of the env var, not the words
             "destination": "T...your-treasury...",
-            "allowed_destinations": ["T...your-treasury..."],
-            "gas_trx": "20",          # TRX sent to a deposit address that lacks fees
-            "fee_limit_trx": "30",    # max TRX a single transfer may burn
-            "min_amount": "1",        # don't bother forwarding dust below 1 USDT
+            "gas_trx": "20",            # TRX sent to a deposit address that lacks fees
+            "fee_limit_trx": "30",      # max TRX one transfer may burn
             "api_key": os.environ.get("TRONGRID_API_KEY"),
+        },
+        "BTC:mainnet": {
+            "mnemonic_env": "CHAINWATCH_FORWARDER_MNEMONIC",
+            "destination": "bc1q...your-wallet...",
+            "fee_target": "halfHourFee", # mempool.space target
+            "max_fee_rate": "50",        # sat/vB; above this, wait instead of overpaying
+        },
+        "USDC:ethereum": {
+            "mnemonic_env": "CHAINWATCH_FORWARDER_MNEMONIC",
+            "destination": "0x...your-wallet...",
+            "max_fee_gwei": "40",        # above this, wait instead of overpaying
         },
     },
 }
 ```
 
-For each paid invoice (19 confirmations, so final), it:
-1. derives that address's key and **refuses unless it matches the invoice
-   address**;
-2. reads the USDT balance; zero means it was already forwarded, so there's
-   nothing to do;
-3. sends `gas_trx` from the **gas wallet** (index 0 of the same account) if
-   the address can't pay its own fee;
-4. sends the whole balance to `destination` and waits for a SUCCESS receipt.
+The forwarder type is taken from the chain's backend. Set `"type"` only for a
+custom backend.
 
-**Safety rails:**
-* **Wallet check:** the mnemonic must produce exactly the xpub your backend
-  watches, or the forwarder refuses to start.
-* **Destination check:** the destination must be on `allowed_destinations`,
-  and is checked again before every send.
-* **Fee cap:** fees are capped by `fee_limit_trx`.
-* **Never twice:** a unique `ForwardRecord` per invoice, row-locked while
-  working, plus the balance check, means a payment is never forwarded twice,
-  even after a crash.
-* **Bounded retries:** failures are retried up to `FORWARD_MAX_ATTEMPTS` and
-  then left as `failed` for you, with `forward_failed` sent.
+**Keys for every forwarder:**
 
-Keep a small TRX float on the gas wallet: index 0's address, shown by
-`conf.get_forwarder("USDT", "tron").gas_address`. Each forward currently burns
-around 13 TRX at mainnet prices. `--include-underpaid` also moves funds from
-underpaid invoices whose late window has closed.
+| Key | Default | Meaning |
+|---|---|---|
+| `mnemonic_env` | required | Name of the environment variable holding the forwarder seed. |
+| `passphrase_env` | none | Name of an environment variable holding a BIP39 passphrase, if you use one. |
+| `destination` | required | Where funds go. |
+| `allowed_destinations` | `[destination]` | Allowlist; the destination must be on it, and is checked again before every send. |
+| `min_amount` | BTC `0.0001`, tokens `1` | Don't forward less than this (in coin units). |
+| `account` / `account_path` | `0` / standard | BIP44 account, or a full account path if your xpub came from a non-standard one. |
+| `type` | inferred | `"tron_trc20"`, `"bitcoin"` or `"erc20"`. |
+
+**TRON only:**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `gas_trx` | `"20"` | TRX the gas wallet sends to a deposit address that can't pay its fee. |
+| `fee_limit_trx` | `"30"` | Maximum TRX one transfer may burn. |
+| `api_key` | none | TronGrid API key. |
+| `network` | backend's | `mainnet`, `nile` or `shasta`. |
+
+**Bitcoin only:**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `fee_target` | `"halfHourFee"` | mempool.space fee target (`fastestFee`, `halfHourFee`, `hourFee`, `economyFee`). |
+| `fee_rate` | none | Fixed sat/vB instead of asking mempool.space. |
+| `max_fee_rate` | `"100"` | sat/vB cap; above it the forward waits. |
+| `base_url` | mempool.space | Your own Esplora/electrs instead. |
+| `network` | backend's | `mainnet`, `testnet`, `testnet4` or `signet`. |
+
+**ERC-20 only:**
+
+| Key | Default | Meaning |
+|---|---|---|
+| `rpc_url` | backend's | JSON-RPC endpoint (use a provider or your own node, not a public one). |
+| `chain_id` | asked from the node | e.g. `1` Ethereum, `11155111` Sepolia, `137` Polygon. |
+| `max_fee_gwei` | `"50"` | Gas price cap; above it the forward waits. |
+| `gas_limit` | `100000` | Upper bound per token transfer (the node's estimate is used when lower). |
+| `gas_buffer` | `"1.2"` | The gas top-up sent is 20% more than the estimated need. |
+| `wait_seconds` | `180` | How long to wait for a transaction to be mined before checking again later. |
+
+### What happens for each paid invoice
+
+Every forwarder first derives that address's key and **refuses unless it
+matches the invoice address**. Then it reads the balance; zero means it was
+already forwarded, so there's nothing to do. After that:
+
+* **TRON:** if the deposit address can't pay its fee, the gas wallet sends
+  `gas_trx`. Then the whole USDT balance goes to `destination`, and it waits
+  for a SUCCESS receipt.
+* **ERC-20:**
+  1. Prices gas as 2 x the base fee plus the priority tip. If that's above
+     `max_fee_gwei`, it **waits**.
+  2. Tops up the deposit address with ETH from the gas wallet if needed, and
+     waits for that to be mined.
+  3. Sends the whole token balance and waits for receipt status 1.
+* **Bitcoin:**
+  1. Takes the address's **confirmed** coins.
+  2. Gets the fee rate from mempool.space. If it's above `max_fee_rate`, it
+     **waits**.
+  3. Sends everything minus the fee in one transaction (replace-by-fee
+     enabled).
+  4. Records it as `sent`. Later runs mark it `done` once it confirms, or
+     retry it if it was dropped.
+
+`ForwardRecord` keeps the gas transaction, the transfer transaction, the
+amount that arrived and, for Bitcoin, the fee taken from the coins.
+
+### Statuses and retries
+
+| `ForwardRecord.status` | Meaning |
+|---|---|
+| `pending` | Not forwarded yet (new, retrying, or waiting for fees to come down). |
+| `sent` | Broadcast, waiting for confirmation (Bitcoin, or a slow ERC-20 transaction). |
+| `done` | Arrived. `invoice_forwarded` has been sent. |
+| `failed` | Gave up after `FORWARD_MAX_ATTEMPTS` errors; `forward_failed` has been sent. Needs you. |
+
+* **Waiting for lower fees doesn't count as a failure.** When gas or fee
+  rates are above your cap, the record's error says `deferred: ...` and it's
+  simply tried again next run, with no attempts used up.
+* **A payment is never forwarded twice**, even after a crash. There's one
+  `ForwardRecord` per invoice, locked while working, and every send is
+  preceded by a balance check.
+* `--include-underpaid` also moves funds from underpaid invoices whose late
+  window has closed.
+
+### Forwarding log
+
+There are two tables, both read-only in the admin:
+
+* **`ForwardRecord`** has one row per invoice, holding the **current** state:
+  from and to addresses, amount, fee, status, the gas and transfer
+  transactions, the attempt count and the last error.
+* **`ForwardEvent`** has one row per **attempt or status change**, and is never
+  overwritten. It's the history to use for logs, audits and disputes. Each row
+  copies in the addresses, amount, fee, transaction IDs, attempt number and a
+  message, so it reads on its own in exports.
+
+| `ForwardEvent.kind` | Meaning |
+|---|---|
+| `sent` | Broadcast, waiting for confirmation |
+| `done` | Arrived (TRON, or ERC-20 mined within `wait_seconds`) |
+| `confirmed` | A previously `sent` transfer confirmed |
+| `dropped` | A `sent` transfer never confirmed; it will be retried |
+| `deferred` | Waiting: fees above your cap, or the gas top-up not mined yet |
+| `error` | An attempt failed; it will be retried |
+| `failed` | Gave up after `FORWARD_MAX_ATTEMPTS`; needs you |
+| `nothing` | The balance was already zero |
+
+```python
+from chainwatch_payments.contrib.django.models import ForwardEvent, ForwardRecord
+
+record = ForwardRecord.objects.get(invoice_model="billing.invoice", invoice_pk=str(invoice.pk))
+for e in record.events.all():          # oldest first
+    print(e.created_at, e.kind, e.amount, e.from_address, "->", e.to_address, e.transfer_tx, e.message)
+
+ForwardEvent.objects.filter(kind="failed")      # everything that needs attention
+```
+
+In the admin, open a forward record to see its full history inline, or
+browse **Forward events** across all forwards, filtered by kind, asset and
+network.
+
+### Gas wallets (TRON and ERC-20)
+
+The gas wallet is **index 0** of the same account; that's why invoices start
+at index 1. Keep a small float on it:
+
+* **TRON:** around 13 TRX per forward at current mainnet prices.
+* **Ethereum:** depends on gas prices. A token transfer uses roughly 50,000 to
+  65,000 gas.
+
+Its address is `conf.get_forwarder("USDT", "tron").gas_address` (or the same
+for your ERC-20 chain). A little of the coin can be left on each deposit
+address after forwarding; that's normal.
 
 ## Security notes
 

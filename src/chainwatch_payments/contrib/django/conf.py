@@ -92,6 +92,8 @@ class BackendConfig:
     address_mode: str                 # "hd" | "single"
     amount_step: Decimal | None       # single mode
     max_slots: int
+    label: str = ""                   # display name at checkout ("" = automatic)
+    checkout: bool = True             # offered by payment_options()
 
 
 _lock = threading.RLock()
@@ -171,10 +173,22 @@ def _build_fee_estimator(label: str, spec: Any) -> FeeEstimator | None:
     return est
 
 
+def _label(label: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise ImproperlyConfigured(f"{label}.label must be a string")
+    return value.strip()
+
+
+def _bool(label: str, key: str, value: Any) -> bool:
+    if not isinstance(value, bool):
+        raise ImproperlyConfigured(f"{label}.{key} must be True or False")
+    return value
+
+
 _ENTRY_KEYS = {
     "type", "options", "backend", "volatility_buffer", "network_fee", "underpay_tolerance",
     "confirmations", "late_payment_hours", "late_payment_pricing", "fee_estimator", "fee_margin",
-    "address_mode", "amount_step", "max_slots",
+    "address_mode", "amount_step", "max_slots", "label", "checkout",
 }
 
 
@@ -233,6 +247,8 @@ def _load() -> tuple[PaymentRegistry, dict[tuple[str, str], BackendConfig]]:
             address_mode=mode,
             amount_step=step,
             max_slots=int(entry.get("max_slots", 1000)),
+            label=_label(label, entry.get("label", "")),
+            checkout=_bool(label, "checkout", entry.get("checkout", True)),
         )
     return registry, configs
 
@@ -321,19 +337,40 @@ def get_price_provider() -> PriceProvider:
 
 # -- opt-in forwarder ------------------------------------------------------------------
 
-_FORWARDER_KEYS = {"type", "mnemonic_env", "passphrase_env", "destination", "allowed_destinations",
-                   "network", "api_key", "gas_trx", "fee_limit_trx", "min_amount", "client", "xpub",
-                   "contract", "account"}
+_COMMON_FORWARDER_KEYS = {"type", "mnemonic_env", "passphrase_env", "destination", "allowed_destinations",
+                          "min_amount", "client", "xpub", "account", "account_path"}
+_FORWARDER_KEYS = {
+    "tron_trc20": _COMMON_FORWARDER_KEYS | {"network", "api_key", "gas_trx", "fee_limit_trx", "contract"},
+    "bitcoin": _COMMON_FORWARDER_KEYS | {"network", "base_url", "fee_target", "fee_rate", "max_fee_rate"},
+    "erc20": _COMMON_FORWARDER_KEYS | {"rpc_url", "chain_id", "contract", "gas_limit", "max_fee_gwei",
+                                       "gas_buffer", "wait_seconds"},
+}
 
 
 def forwarder_keys() -> list[tuple[str, str]]:
     return [_split_key(k) for k in (get("FORWARDERS") or {})]
 
 
+def _forwarder_type(entry: dict[str, Any], backend: Any, label: str) -> str:
+    kind = entry.get("type")
+    if kind is None:
+        if isinstance(backend, TronTRC20Backend):
+            kind = "tron_trc20"
+        elif isinstance(backend, BitcoinBackend):
+            kind = "bitcoin"
+        elif isinstance(backend, ERC20Backend):
+            kind = "erc20"
+        else:
+            raise ImproperlyConfigured(f"FORWARDERS[{label}]: set 'type' (tron_trc20, bitcoin or erc20)")
+    if kind not in _FORWARDER_KEYS:
+        raise ImproperlyConfigured(f"FORWARDERS[{label}]: type must be one of {sorted(_FORWARDER_KEYS)}")
+    return kind
+
+
 def _build_forwarder(asset: str, network: str):
     import os
 
-    from ...forwarder.tron import ForwardError, TronpyClient, TronTokenForwarder
+    from ...forwarder.base import ForwardError
 
     entries = {_split_key(k): v for k, v in (get("FORWARDERS") or {}).items()}
     label = f"{asset}:{network}"
@@ -341,11 +378,16 @@ def _build_forwarder(asset: str, network: str):
         entry = entries[(asset, network)]
     except KeyError:
         raise ImproperlyConfigured(f"no CHAINWATCH['FORWARDERS'] entry for {label}") from None
-    extra = set(entry) - _FORWARDER_KEYS
+    cfg = backend_config(asset, network)
+    backend = cfg.backend
+    kind = _forwarder_type(entry, backend, label)
+    extra = set(entry) - _FORWARDER_KEYS[kind]
     if extra:
-        raise ImproperlyConfigured(f"FORWARDERS[{label}]: unknown keys {sorted(extra)}")
-    if entry.get("type", "tron_trc20") != "tron_trc20":
-        raise ImproperlyConfigured(f"FORWARDERS[{label}]: only type 'tron_trc20' is supported")
+        raise ImproperlyConfigured(f"FORWARDERS[{label}] ({kind}): unknown keys {sorted(extra)}")
+    if cfg.address_mode != "hd":
+        raise ImproperlyConfigured(f"FORWARDERS[{label}]: forwarding needs address_mode 'hd' "
+                                   "(single-address payments already land in your wallet)")
+
     env = entry.get("mnemonic_env")
     if not env:
         raise ImproperlyConfigured(f"FORWARDERS[{label}] needs 'mnemonic_env' (the NAME of an environment variable)")
@@ -353,28 +395,61 @@ def _build_forwarder(asset: str, network: str):
     if not mnemonic:
         raise ImproperlyConfigured(f"environment variable {env} is not set (forwarder seed for {label})")
     passphrase = os.environ.get(entry["passphrase_env"], "") if entry.get("passphrase_env") else ""
-
-    cfg = backend_config(asset, network)
-    backend = cfg.backend
     watch_key = getattr(backend, "_xpub", None)
     xpub = entry.get("xpub") or (watch_key.serialize() if watch_key is not None else None)
-    contract = entry.get("contract") or getattr(backend, "contract", None)
-    if not xpub or not contract:
-        raise ImproperlyConfigured(f"FORWARDERS[{label}]: the backend must be a TRC-20 backend with an xpub")
+    if not xpub:
+        raise ImproperlyConfigured(f"FORWARDERS[{label}]: the backend has no xpub to check the seed against")
     destination = entry.get("destination")
     if not destination:
         raise ImproperlyConfigured(f"FORWARDERS[{label}] needs 'destination'")
-    client = entry.get("client") or TronpyClient(
-        network=entry.get("network") or getattr(backend, "network", "mainnet"), api_key=entry.get("api_key"))
     decimals = backend.capabilities().decimals
+    common = dict(
+        mnemonic=mnemonic, passphrase=passphrase, expected_xpub=xpub, destination=destination,
+        allowed_destinations=entry.get("allowed_destinations") or [destination],
+        account=int(entry.get("account", 0)), account_path=entry.get("account_path"),
+    )
+    min_default = {"bitcoin": "0.0001", "tron_trc20": "1", "erc20": "1"}[kind]
+    min_amount = int(_decimal(entry.get("min_amount", min_default), f"{label}.min_amount") * 10**decimals)
     try:
-        return TronTokenForwarder(
-            mnemonic=mnemonic, passphrase=passphrase, expected_xpub=xpub, contract=contract,
-            destination=destination, allowed_destinations=entry.get("allowed_destinations") or [destination],
-            client=client, account=int(entry.get("account", 0)),
-            gas_trx=_decimal(entry.get("gas_trx", "20"), f"{label}.gas_trx"),
-            fee_limit_trx=_decimal(entry.get("fee_limit_trx", "30"), f"{label}.fee_limit_trx"),
-            min_amount=int(_decimal(entry.get("min_amount", "1"), f"{label}.min_amount") * 10**decimals),
+        if kind == "tron_trc20":
+            from ...forwarder.tron import TronpyClient, TronTokenForwarder
+
+            contract = entry.get("contract") or getattr(backend, "contract", None)
+            client = entry.get("client") or TronpyClient(
+                network=entry.get("network") or getattr(backend, "network", "mainnet"), api_key=entry.get("api_key"))
+            return TronTokenForwarder(
+                **common, contract=contract, client=client, min_amount=min_amount,
+                gas_trx=_decimal(entry.get("gas_trx", "20"), f"{label}.gas_trx"),
+                fee_limit_trx=_decimal(entry.get("fee_limit_trx", "30"), f"{label}.fee_limit_trx"),
+            )
+        if kind == "bitcoin":
+            from ...forwarder.bitcoin import BitcoinForwarder, EsploraSpendClient
+
+            btc_network = entry.get("network") or getattr(backend, "network", "mainnet")
+            if getattr(backend, "script", "p2wpkh") != "p2wpkh":
+                raise ImproperlyConfigured(
+                    f"FORWARDERS[{label}]: only native SegWit (p2wpkh) addresses can be forwarded")
+            client = entry.get("client") or EsploraSpendClient(btc_network, base_url=entry.get("base_url"))
+            return BitcoinForwarder(
+                **common, client=client, network=btc_network, min_amount=min_amount,
+                fee_target=entry.get("fee_target", "halfHourFee"),
+                fee_rate=_decimal(entry["fee_rate"], f"{label}.fee_rate") if entry.get("fee_rate") else None,
+                max_fee_rate=_decimal(entry.get("max_fee_rate", "100"), f"{label}.max_fee_rate"),
+            )
+        from ...forwarder.evm import ERC20Forwarder, EvmRpcClient
+
+        contract = entry.get("contract") or getattr(backend, "contract", None)
+        rpc_url = entry.get("rpc_url") or getattr(getattr(backend, "source", None), "rpc_url", None)
+        if not entry.get("client") and not rpc_url:
+            raise ImproperlyConfigured(f"FORWARDERS[{label}] needs 'rpc_url'")
+        client = entry.get("client") or EvmRpcClient(rpc_url)
+        return ERC20Forwarder(
+            **common, contract=contract, client=client, min_amount=min_amount,
+            chain_id=int(entry["chain_id"]) if entry.get("chain_id") else None,
+            gas_limit=int(entry.get("gas_limit", 100_000)),
+            max_fee_gwei=_decimal(entry.get("max_fee_gwei", "50"), f"{label}.max_fee_gwei"),
+            gas_buffer=_decimal(entry.get("gas_buffer", "1.2"), f"{label}.gas_buffer"),
+            wait_seconds=float(entry.get("wait_seconds", 180)),
         )
     except ForwardError as exc:
         raise ImproperlyConfigured(f"FORWARDERS[{label}]: {exc}") from exc

@@ -30,9 +30,22 @@ API may still change between releases.
   - Polling backoff for expired and paid invoices.
   - Gap-limit warning signal for HD wallets.
   - Single-address mode (shared address + unique amount slots).
-- **Forwarder (`[forwarder]` extra, opt-in):** moves paid USDT from one-time
-  TRON addresses to an allow-listed destination, funding gas from index 0;
-  `chainwatch_forward` command, `ForwardRecord` table, never forwards twice.
+- **Coin choice at checkout:** `checkout.payment_options()`, `payment_choices()`,
+  `parse_option()`, and `quote_invoice()` / `quote_options()` to preview the
+  amount for each coin without creating an invoice or using an address. New
+  per-chain `label` and `checkout` keys.
+- **Forwarders (opt-in, `[forwarder]` or `[forwarder-tron|btc|evm]`):** move
+  paid funds from one-time addresses to an allow-listed destination.
+  - TRON TRC-20: a gas wallet at index 0 pays the fees.
+  - EVM ERC-20: a gas wallet pays the fees; an EIP-1559 fee cap waits instead
+    of overpaying.
+  - Bitcoin native SegWit: the fee comes from the coins; there's a fee-rate
+    cap, transactions signal RBF, and they're tracked `sent` to `done`.
+
+  Also: the `chainwatch_forward` command, the `ForwardRecord` table (current
+  state, with `fee`) and the `ForwardEvent` table (an append-only log of every
+  attempt and status change). Payments are never forwarded twice, and waiting
+  on high fees doesn't use up attempts.
 - `LICENSE` file, CI workflow (lint, types, Python 3.10-3.14, Django 4.2+),
   ruff and mypy configuration.
 

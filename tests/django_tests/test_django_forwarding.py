@@ -124,4 +124,4 @@ def test_forwarder_config_errors(net, settings, monkeypatch):
 def test_forward_command(net, capsys):
     paid_invoice(net)
     call_command("chainwatch_forward")
-    assert "forwarded=1 nothing=0 errors=0" in capsys.readouterr().out
+    assert "forwarded=1 sent=0 nothing=0 deferred=0 errors=0" in capsys.readouterr().out

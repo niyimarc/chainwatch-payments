@@ -11,7 +11,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 __all__ = ["InvoiceStatus", "AddressMode", "AbstractCryptoInvoice", "DerivationCounter",
-           "InvoiceEvent", "ForwardRecord", "ForwardStatus",
+           "InvoiceEvent", "ForwardRecord", "ForwardStatus", "ForwardEvent", "ForwardEventKind",
            "PAID_STATUSES", "ACTIVE_STATUSES", "LATE_WATCH_STATUSES"]
 
 
@@ -203,7 +203,10 @@ class ForwardRecord(models.Model):
     network = models.CharField(max_length=32)
     from_address = models.CharField(max_length=128)
     to_address = models.CharField(max_length=128)
-    amount = models.DecimalField(**_AMOUNT, default=0)
+    amount = models.DecimalField(**_AMOUNT, default=0, help_text="Amount that arrives at the destination.")
+    fee = models.DecimalField(**_AMOUNT, default=0,
+                              help_text="Network fee paid from the forwarded coins (BTC); "
+                                        "gas paid separately is not included.")
     status = models.CharField(max_length=12, choices=ForwardStatus.choices, default=ForwardStatus.PENDING)
     gas_tx = models.CharField(max_length=128, blank=True, default="")
     transfer_tx = models.CharField(max_length=128, blank=True, default="")
@@ -219,3 +222,46 @@ class ForwardRecord(models.Model):
 
     def __str__(self) -> str:
         return f"{self.amount} {self.asset} {self.from_address} -> {self.to_address} ({self.status})"
+
+
+class ForwardEventKind(models.TextChoices):
+    SENT = "sent", "Broadcast, awaiting confirmation"
+    DONE = "done", "Arrived"
+    CONFIRMED = "confirmed", "Earlier broadcast confirmed"
+    NOTHING = "nothing", "Balance already zero"
+    DEFERRED = "deferred", "Waiting (fees above cap, funding not mined)"
+    ERROR = "error", "Attempt failed, will retry"
+    FAILED = "failed", "Gave up after max attempts"
+    DROPPED = "dropped", "Broadcast never confirmed, will retry"
+
+
+class ForwardEvent(models.Model):
+    """One row per forwarding attempt or status change: the forwarding log.
+
+    Self-contained on purpose (addresses, amounts and tx ids are copied in),
+    so each row reads on its own in exports and audits.
+    """
+
+    record = models.ForeignKey(ForwardRecord, on_delete=models.CASCADE, related_name="events")
+    kind = models.CharField(max_length=12, choices=ForwardEventKind.choices)
+    status = models.CharField(max_length=12, choices=ForwardStatus.choices,
+                              help_text="The record's status after this event.")
+    attempt = models.PositiveIntegerField(default=0)
+    asset = models.CharField(max_length=16)
+    network = models.CharField(max_length=32)
+    from_address = models.CharField(max_length=128)
+    to_address = models.CharField(max_length=128)
+    amount = models.DecimalField(**_AMOUNT, default=0)
+    fee = models.DecimalField(**_AMOUNT, default=0)
+    gas_tx = models.CharField(max_length=128, blank=True, default="")
+    transfer_tx = models.CharField(max_length=128, blank=True, default="")
+    message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        app_label = "chainwatch"
+        ordering = ["created_at", "pk"]
+        indexes = [models.Index(fields=["record", "created_at"], name="chainwatch_fwdevent_record")]
+
+    def __str__(self) -> str:
+        return f"{self.created_at:%Y-%m-%d %H:%M:%S} {self.kind}: {self.amount} {self.asset} -> {self.to_address}"

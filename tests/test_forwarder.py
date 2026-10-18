@@ -94,7 +94,7 @@ def test_safety_rails():
         make(expected_xpub=ETH_XPUB)
     with pytest.raises(ForwardError, match="not in the allowed"):
         make(destination=OTHER)
-    with pytest.raises(ForwardError, match="invalid TRON address"):
+    with pytest.raises(ForwardError, match="invalid destination address"):
         make(allowed_destinations=[TREASURY, "Tnotanaddress"])
     with pytest.raises(ForwardError, match="12-24 words"):
         make(mnemonic="abandon about")

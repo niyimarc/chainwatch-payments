@@ -15,10 +15,10 @@ from django.db.models import F, Max, Q
 from django.utils import timezone
 
 from ...errors import ChainwatchError, UnsupportedCapability
-from ...fees import estimate_fee_fiat
-from ...pricing import PriceUnavailable, quote
+from ...pricing import PriceUnavailable
 from ...types import Match, MatchMode, PaymentStatus, State, Tolerance, from_base_units, to_base_units
 from . import conf
+from .checkout import price_invoice
 from .models import (
     ACTIVE_STATUSES,
     LATE_WATCH_STATUSES,
@@ -150,13 +150,7 @@ def create_invoice(
     cfg = conf.backend_config(asset, network)
     caps = cfg.backend.capabilities()
     registry = conf.get_registry()
-    prices = conf.get_price_provider()
-
-    rate = prices.rate(asset, fiat_currency)
-    fee = estimate_fee_fiat(cfg.fee_estimator, fiat=fiat_currency, prices=prices,
-                            minimum=cfg.network_fee, margin=cfg.fee_margin)
-    q = quote(asset=asset, fiat=fiat_currency, fiat_price=fiat_price, rate=rate, decimals=caps.decimals,
-              volatility_buffer=cfg.volatility_buffer, network_fee_fiat=fee)
+    q = price_invoice(cfg, fiat_price, fiat_currency)
     try:
         start_height = registry.current_height(asset, network)
     except ChainwatchError as exc:  # optional hint only; never block a checkout

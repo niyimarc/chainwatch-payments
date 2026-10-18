@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 from django.utils.html import format_html_join
 
-from .models import DerivationCounter, ForwardRecord, InvoiceEvent
+from .models import DerivationCounter, ForwardEvent, ForwardRecord, InvoiceEvent
 
 __all__ = ["CryptoInvoiceAdminMixin"]
 
@@ -72,8 +72,31 @@ class InvoiceEventAdmin(_ReadOnly):
     search_fields = ("invoice_pk", "address")
 
 
+class ForwardEventInline(admin.TabularInline):
+    model = ForwardEvent
+    extra = 0
+    can_delete = False
+    fields = ("created_at", "kind", "status", "attempt", "amount", "fee", "gas_tx", "transfer_tx", "message")
+    readonly_fields = fields
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ForwardEvent)
+class ForwardEventAdmin(_ReadOnly):
+    list_display = ("created_at", "kind", "asset", "network", "amount", "fee", "from_address", "to_address",
+                    "transfer_tx", "attempt")
+    list_filter = ("kind", "asset", "network")
+    search_fields = ("from_address", "to_address", "transfer_tx", "gas_tx", "record__invoice_pk")
+
+
 @admin.register(ForwardRecord)
 class ForwardRecordAdmin(_ReadOnly):
+    inlines = [ForwardEventInline]
     list_display = ("created_at", "invoice_model", "invoice_pk", "asset", "amount", "to_address",
                     "status", "attempts", "transfer_tx")
     list_filter = ("status", "asset", "network")

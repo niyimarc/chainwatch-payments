@@ -35,8 +35,11 @@ evm = ["httpx>=0.27", "pycryptodome>=3.20"]
 fast = ["coincurve>=20"]
 # Django integration: abstract invoice model, poll command, signals.
 django = ["django>=4.2"]
-# OPT-IN hot-wallet forwarder for TRON (signs transactions; see README "Forwarding").
-forwarder = ["tronpy>=0.5"]
+# OPT-IN hot-wallet forwarders (they sign transactions; see DJANGO_DOC.md "Forwarding").
+forwarder-tron = ["tronpy>=0.5"]
+forwarder-btc = ["embit>=0.8", "httpx>=0.27"]
+forwarder-evm = ["eth-account>=0.10", "httpx>=0.27"]
+forwarder = ["chainwatch-payments[forwarder-tron,forwarder-btc,forwarder-evm]"]
 all = ["chainwatch-payments[bitcoin,tron,evm]"]
 test = ["pytest>=8", "pytest-django>=4.8", "django>=4.2"]
 
