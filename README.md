@@ -35,6 +35,17 @@ pip install "chainwatch-payments[forwarder]"  # + opt-in forwarders, TRON/BTC/ER
 pip install "chainwatch-payments[fast]"       # optional libsecp256k1 speed-up
 ```
 
+It is published on [PyPI](https://pypi.org/project/chainwatch-payments/). In
+`requirements.txt`, list the extras you need and pin the version:
+
+```
+chainwatch-payments[django,bitcoin,tron]==0.0.2
+```
+
+then run `pip install -r requirements.txt`. Pinning matters while the version
+is `0.0.x`, because the API may still change between releases (see
+`CHANGELOG.md` before upgrading, and run `python manage.py migrate` after).
+
 The core is pure Python. The chain extras add `httpx` (the default HTTP
 transport for the shipped chain sources) and, for TRON/EVM, `pycryptodome` for
 a fast Keccak. `[fast]` adds `coincurve` (libsecp256k1) for quicker address
@@ -52,8 +63,10 @@ same vectors.
   `<account xpub>/0/<index>`. The package has no code path that accepts,
   derives or uses a private key. Extended private keys (`xprv`, `zprv`,
   `tprv`, ...) are rejected with `PrivateKeyRejected`.
-* It **never sends, sweeps or refunds**. Chain access is read-only (explorer
-  REST APIs or JSON-RPC).
+* The core **never sends anything**. Chain access is read-only (explorer
+  REST APIs or JSON-RPC). The only part that sends is the opt-in
+  `[forwarder]`, and it only sends to your own allowlisted wallet addresses,
+  never to customers. Refunds are not handled by this package.
 * It is **stateless**. Each `confirm()` re-reads the chain and computes the
   status from scratch, so results are deterministic and idempotent, and a
   reorg that drops a transaction is reflected on the next call.
@@ -174,7 +187,29 @@ PaymentStatus(
   `ChainSourceError`. A failed read is never reported as "no payment".
 
 Amounts are always `Decimal`, `str` or `int` in the asset's human units.
-Floats are refused.
+Floats are refused. To convert yourself, `to_base_units("12.5", 6) == 12500000`
+and `from_base_units(12500000, 6) == Decimal("12.5")`; `to_base_units` raises if
+the amount has more decimals than the asset supports.
+
+## Errors
+
+Every error the package raises is a subclass of `ChainwatchError`, so one
+`except ChainwatchError` catches them all. The ones worth handling:
+
+| Exception | When | What to do |
+|---|---|---|
+| `ChainSourceError` | The explorer or node couldn't be read (after retries). | Try again later. It never means "no payment". |
+| `PriceUnavailable` | No trustworthy rate (feed down, or the cross-check disagreed). `FeeUnavailable` is a subclass. | Don't quote; tell the customer crypto payment is unavailable for now. |
+| `BackendNotFound` | No backend registered for that `(asset, network)`. | A configuration mistake. |
+| `BackendAlreadyRegistered` | `register()` twice for the same key. | Pass `replace=True` if intended. |
+| `UnsupportedCapability` | E.g. `derive_address` on a single-address backend, or a memo on a chain without memos. | A configuration mistake. |
+| `MissingDependency` | An extra isn't installed (e.g. `httpx` for the chain sources). | Install the extra named in the message. |
+| `PrivateKeyRejected` | An extended **private** key was given where an xpub belongs. | Export the account xpub instead. |
+
+The Django app adds `SlotsExhausted` (single-address mode, every amount slot
+in use) and raises Django's `ImproperlyConfigured` for any settings mistake.
+The forwarders raise `ForwardError`, and `ForwardDeferred` when they are
+waiting for lower fees.
 
 ## Address modes
 
@@ -234,13 +269,17 @@ shared by every backend, so a new chain only has to report transfers.
 ## Notes per chain
 
 * **ERC-20 one-time addresses** hold tokens but no ETH, so moving the funds
-  later needs gas sent to each address first. That sweeping step is outside
-  this package; factor it into whether HD or single-address suits you.
+  later needs gas sent to each address first. The opt-in ERC-20 forwarder does
+  this for you (gas top-up, then the token transfer); without it you move the
+  funds from your wallet yourself. Single-address mode avoids the gas step.
 * **ERC-20 scanning** reads logs over a block window: either estimated from
   `not_before` (recommended, cheap) or the last `lookback_blocks` (default
   20,000). Tune `chunk_size` to your RPC provider's `eth_getLogs` limit.
-* **TRON** needs one `gettransactioninfobyid` call per matching transfer to get
-  its block and execution result; failed (reverted) transfers are ignored.
+* **TRON** checks recent transfers with one `gettransactioninfobyid` call each
+  (block and execution result; failed transfers are ignored). Transfers older
+  than `deep_seconds` (default 600) are settled from their block time instead,
+  which saves calls against TronGrid's rate limit. Use a TronGrid API key in
+  production.
 * **BTC** credits are counted per output; change outputs to other addresses in
   the same transaction are ignored.
 
@@ -297,6 +336,79 @@ estimator fails it falls back to the minimum.
   real mainnet USDT transfer in October 2026: TRON adds a dynamic-energy
   penalty on busy contracts, so the cost is about twice the 65,000 base.
 
+### Timeouts, retries and your own HTTP client
+
+Every network call goes through one small client, `HttpxClient`: a 15 s
+timeout, and rate limits (429) or transient 5xx/network errors retried twice
+with exponential backoff (honouring `Retry-After`, capped at 10 s). To change
+that, pass your own client to any backend, price provider or fee estimator:
+
+```python
+from chainwatch_payments.http import HttpxClient
+
+http = HttpxClient(timeout=30, max_retries=4, backoff=1.0, max_delay=20)
+backend = TronTRC20Backend(xpub, network="mainnet", api_key=key, http=http)
+prices = CoinGeckoProvider("your-demo-key", http=http)
+```
+
+Anything with `get_json(url, params=None, headers=None)` and
+`post_json(url, payload, headers=None)` can be used instead (the Bitcoin
+forwarder also uses `post_text` to broadcast), for example to add a proxy
+or your own metrics.
+
+## Logging
+
+The package logs through the standard `logging` module and never prints:
+
+* `chainwatch_payments`: pricing, invoice creation and polling (a failed
+  invoice check is logged at `WARNING` and skipped);
+* `chainwatch_payments.forwarder`: every forwarding attempt, deferral and
+  failure.
+
+Send `WARNING` and above to your error tracker. In Django, for example:
+
+```python
+LOGGING = {
+    "version": 1,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {"chainwatch_payments": {"handlers": ["console"], "level": "INFO"}},
+}
+```
+
+## Testing your own app with `MockBackend`
+
+`MockBackend` is an in-memory chain, so your own tests can simulate payments
+without a network or real coins:
+
+```python
+from chainwatch_payments import PaymentRegistry, State
+from chainwatch_payments.backends import MockBackend
+
+chain = MockBackend("USDT", "test", decimals=6, default_confirmations=3)
+registry = PaymentRegistry()
+registry.register("USDT", "test", chain)
+
+addr = registry.derive_address("USDT", "test", 1)
+tx = chain.credit(addr, "25")                          # in the mempool
+assert registry.confirm("USDT", "test", addr, "25").state is State.SEEN
+chain.mine(3)                                          # 3 confirmations
+assert registry.confirm("USDT", "test", addr, "25").state is State.CONFIRMED
+chain.reorg(3)                                         # the payment disappears
+assert registry.confirm("USDT", "test", addr, "25").state is State.NONE
+```
+
+* `credit(address, amount, mined=False, at=None)` sends a payment (returns
+  its tx id); `mine(n)` adds blocks; `reorg(depth, drop=True)` orphans the
+  last blocks; `drop(tx_id)` removes one transaction.
+* Block times are the real clock by default; `MockBackend(..., fixed_times=True)`
+  makes them deterministic, and `credit(..., mined=True, at=some_datetime)`
+  sets one exactly (useful for late-payment tests).
+* `single_address="ADDR"` with `hd=False` simulates single-address mode.
+
+In Django, set a backend entry to `"type": "mock"` in your test settings and
+reach the chain with `conf.backend_config("USDT", "test").backend`; see
+DJANGO_DOC.md, "Testing your integration".
+
 ## Async (FastAPI and friends)
 
 ```python
@@ -316,19 +428,21 @@ are kept.
 ## Django integration
 
 The optional `[django]` extra turns the package into a reusable Django app:
-an abstract invoice model to inherit, `create_invoice()` at checkout, a
-`chainwatch_poll` command, signals such as `invoice_paid`, late-payment
-pricing at the price when the payment arrived, an audit trail, an admin
-mixin and opt-in forwarders that move funds to your wallet (TRON, BTC,
-ERC-20).
+an abstract invoice model to inherit, `create_invoice()` at checkout, helpers
+that let the customer choose a coin (with price previews), a `chainwatch_poll`
+command, signals such as `invoice_paid`, late-payment pricing at the price
+when the payment arrived, an audit trail, an admin mixin and opt-in
+forwarders that move funds to your wallet (TRON, BTC, ERC-20), with a full
+forwarding log.
 
 ```
 pip install "chainwatch-payments[django,bitcoin,tron]"
 ```
 
 **Full setup guide: [DJANGO_DOC.md](DJANGO_DOC.md)**, covering installation,
-the settings reference, the model, checkout, polling, signals, statuses, late
-payments, single-address mode, the admin, forwarding and security notes.
+the settings reference, the model, checkout and coin choice, polling, signals,
+statuses, late payments, single-address mode, the admin, forwarding and its
+log, testing your integration and security notes.
 
 ## Verified presets and live check
 

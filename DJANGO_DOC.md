@@ -24,6 +24,8 @@ and fee helpers), see the [README](README.md).
 - [Audit trail](#audit-trail)
 - [Admin](#admin)
 - [Forwarding (opt-in)](#forwarding-opt-in)
+- [Testing your integration](#testing-your-integration)
+- [Errors to handle](#errors-to-handle)
 - [Security notes](#security-notes)
 
 ```
@@ -278,7 +280,19 @@ Things to know:
 python manage.py chainwatch_poll                 # one pass (cron)
 python manage.py chainwatch_poll --loop          # keep running (Docker/systemd)
 python manage.py chainwatch_poll --model billing.Invoice --limit 500
+python manage.py chainwatch_poll --loop --interval 15   # override POLL_INTERVAL_SECONDS
 ```
+
+| Option | Meaning |
+|---|---|
+| `--loop` | Keep running instead of doing one pass. |
+| `--interval N` | Seconds between passes with `--loop` (default `POLL_INTERVAL_SECONDS`). |
+| `--model app.Model` | Only this invoice model (repeatable; default `INVOICE_MODELS`). |
+| `--limit N` | At most N invoices per model per pass. |
+
+To check one invoice right away (a "I have paid" button, say), call
+`invoice.refresh_payment()`; it updates the row and fires signals like a poll
+would.
 
 With Celery or another scheduler, call
 `chainwatch_payments.contrib.django.services.poll_open_invoices()` from a
@@ -497,6 +511,7 @@ custom backend.
 | `min_amount` | BTC `0.0001`, tokens `1` | Don't forward less than this (in coin units). |
 | `account` / `account_path` | `0` / standard | BIP44 account, or a full account path if your xpub came from a non-standard one. |
 | `type` | inferred | `"tron_trc20"`, `"bitcoin"` or `"erc20"`. |
+| `client` | built from the keys below | A ready-made chain client instead (a `TronClient`, `BitcoinSpendClient` or `EvmRpcClient`), e.g. a fake in tests or your own node wrapper. |
 
 **TRON only:**
 
@@ -573,6 +588,19 @@ amount that arrived and, for Bitcoin, the fee taken from the coins.
 * `--include-underpaid` also moves funds from underpaid invoices whose late
   window has closed.
 
+`chainwatch_forward` takes the same `--loop`, `--interval N`, `--model` and
+`--limit N` (per chain per run) options as `chainwatch_poll`. From Celery or
+another scheduler, call
+`chainwatch_payments.contrib.django.forwarding.forward_paid_invoices()`
+instead; it returns a `ForwardRun` with counts (`forwarded`, `sent`,
+`nothing`, `deferred`, `errors`) and the `failures` list. Run it only in the
+worker that holds the mnemonic.
+
+The package never refunds customers. An `overpaid` or `underpaid` invoice
+records the exact amounts and transactions; any refund is sent by you, from
+your wallet, to an address the customer gives you (not the address the
+payment came from, which is often an exchange).
+
 ### Forwarding log
 
 There are two tables, both read-only in the admin:
@@ -622,6 +650,58 @@ at index 1. Keep a small float on it:
 Its address is `conf.get_forwarder("USDT", "tron").gas_address` (or the same
 for your ERC-20 chain). A little of the coin can be left on each deposit
 address after forwarding; that's normal.
+
+## Testing your integration
+
+Use mock backends in your test settings, so tests never touch a real chain:
+
+```python
+# settings_test.py
+CHAINWATCH = {
+    "BACKENDS": {
+        "USDT:test": {"type": "mock", "options": {"asset": "USDT", "network": "test",
+                                                   "decimals": 6, "default_confirmations": 2}},
+        "BTC:test": {"type": "mock", "options": {"asset": "BTC", "network": "test", "decimals": 8}},
+    },
+    "PRICE_PROVIDER": "fixed",
+    "FIXED_RATES": {"USDT:USD": "1", "BTC:USD": "100000"},   # no price API in tests
+    "INVOICE_MODELS": ["billing.Invoice"],
+}
+```
+
+Then pay invoices from your tests:
+
+```python
+from chainwatch_payments.contrib.django import conf
+from chainwatch_payments.contrib.django.services import create_invoice
+
+def test_invoice_gets_paid(db):
+    invoice = create_invoice(Invoice, asset="USDT", network="test", fiat_price="20")
+    chain = conf.backend_config("USDT", "test").backend
+    chain.credit(invoice.address, invoice.total_price)
+    chain.mine(2)
+    invoice.refresh_payment()
+    assert invoice.status == "paid"
+```
+
+`chain.reorg(2)` tests your handling of `invoice_reverted`, and
+`credit(..., mined=True, at=...)` with `MockBackend(fixed_times=True)` tests
+late payments. If you change `settings.CHAINWATCH` inside a test (pytest-django's
+`settings` fixture), call `conf.reset()` afterwards so the new settings are read.
+The README section "Testing your own app with `MockBackend`" lists every mock
+method.
+
+## Errors to handle
+
+* `PriceUnavailable` from `create_invoice` or `quote_invoice`: no trustworthy
+  price right now. Nothing was created; show "crypto payments are temporarily
+  unavailable".
+* `SlotsExhausted` from `create_invoice` (single-address mode only): every
+  amount slot is in use. Raise `max_slots` or wait for invoices to expire.
+* `ImproperlyConfigured`: a settings mistake, raised the first time the
+  settings are read, with the exact key in the message.
+* Chain read errors during polling are logged and retried next pass; they never
+  change an invoice's status. Logger names are in the README, "Logging".
 
 ## Security notes
 

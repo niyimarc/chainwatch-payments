@@ -30,6 +30,9 @@ API may still change between releases.
   - Polling backoff for expired and paid invoices.
   - Gap-limit warning signal for HD wallets.
   - Single-address mode (shared address + unique amount slots).
+- **Docs:** installing from PyPI with `requirements.txt`, an error reference,
+  timeouts/retries and custom HTTP clients, logger names, testing your own
+  app with `MockBackend` (core and Django), command options, and a note that refunds are never handled by the package.
 - **Coin choice at checkout:** `checkout.payment_options()`, `payment_choices()`,
   `parse_option()`, and `quote_invoice()` / `quote_options()` to preview the
   amount for each coin without creating an invoice or using an address. New
